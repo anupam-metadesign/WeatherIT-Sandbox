@@ -23,5 +23,5 @@ create schema if not exists prep;
 
 -- 5. Import the tables you want
 import foreign schema public
-  limit to ('daily_seasonal_indices', 'locations')
+  limit to ("daily_seasonal_indices", "locations")
   from server prep_server into prep;
