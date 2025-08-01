@@ -27,7 +27,7 @@ declare
   table_exists boolean;
 begin
   -- Detect if running locally (Supabase local Docker PostgreSQL is version 15.x, Cloud is 14.x)
-  select current_setting('server_version') like '15.%' into is_local;
+  select current_setting('supabase_env', true) = 'local' into is_local;
 
   -- Check if tables already exist in 'prep' schema
   select exists (
