@@ -23,15 +23,20 @@ create schema if not exists prep;
 -- ✅ Conditionally import only if table doesn't exist
 do $$
 declare
+  is_supabase_cloud boolean;
   table_exists boolean;
 begin
+  -- Check if running on Supabase Cloud (simplified check via hostname)
+  select current_setting('server_version') like '14.%' into is_supabase_cloud;
+
+  -- Check if the foreign tables already exist
   select exists (
     select from information_schema.tables
     where table_schema = 'prep'
       and table_name = 'daily_seasonal_indices'
   ) into table_exists;
 
-  if not table_exists then
+  if is_supabase_cloud and not table_exists then
     raise notice 'Importing foreign tables from prep_server...';
     execute $import$
       import foreign schema public
@@ -39,6 +44,6 @@ begin
       from server prep_server into prep
     $import$;
   else
-    raise notice 'Foreign tables already exist. Skipping import.';
+    raise notice 'Skipping FDW import (either not on Supabase Cloud or tables exist).';
   end if;
 end $$;
