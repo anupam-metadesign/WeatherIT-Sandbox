@@ -1,8 +1,8 @@
--- ✅ Ensure postgis and FDW are installed **before** the DO block
+-- Ensure necessary extensions
 CREATE EXTENSION IF NOT EXISTS "postgis" WITH SCHEMA "extensions";
 CREATE EXTENSION IF NOT EXISTS postgres_fdw;
 
--- ✅ Create server & user mapping (safe to repeat)
+-- Define FDW Server & User Mapping (safe to execute locally)
 CREATE SERVER IF NOT EXISTS prep_server
   FOREIGN DATA WRAPPER postgres_fdw
   OPTIONS (
@@ -18,15 +18,16 @@ CREATE USER MAPPING IF NOT EXISTS FOR postgres
     password 'strong_pw'
   );
 
+-- Ensure prep schema exists
 CREATE SCHEMA IF NOT EXISTS prep;
 
--- ✅ Dynamic FDW Connectivity Check and Conditional Execution
+-- Conditional FDW Import / Local Mock Table Creation
 DO $$
 DECLARE
   fdw_accessible BOOLEAN := false;
   table_exists BOOLEAN;
 BEGIN
-  -- Check if tables already exist in 'prep' schema
+  -- Check if tables already exist
   SELECT EXISTS (
     SELECT FROM information_schema.tables
     WHERE table_schema = 'prep'
@@ -34,28 +35,27 @@ BEGIN
   ) INTO table_exists;
 
   IF NOT table_exists THEN
-    -- Try a harmless FDW query to test if FDW connection works
+    -- Attempt FDW Query to detect cloud environment
     BEGIN
       PERFORM 1 FROM prep_server.public."locations" LIMIT 1;
       fdw_accessible := true;
-      RAISE NOTICE 'FDW server is accessible. Importing foreign tables...';
+      RAISE NOTICE 'FDW server accessible. Importing foreign tables...';
     EXCEPTION WHEN OTHERS THEN
       fdw_accessible := false;
-      RAISE NOTICE 'FDW server is NOT accessible. Creating mock tables locally...';
+      RAISE NOTICE 'FDW server NOT accessible. Creating local mock tables...';
     END;
 
     IF fdw_accessible THEN
-      -- Import actual foreign tables via FDW in Cloud
+      -- Cloud Environment: Import Foreign Tables
       EXECUTE '
         IMPORT FOREIGN SCHEMA public
         LIMIT TO ("daily_seasonal_indices", "locations")
         FROM SERVER prep_server INTO prep
       ';
     ELSE
-      -- Create mock tables locally
-      EXECUTE 'CREATE SCHEMA IF NOT EXISTS prep';
-
-      -- Create simplified prep.locations table
+      -- Local Environment: Create Mock Tables
+      
+      -- prep.locations table with generated column
       EXECUTE '
         CREATE TABLE IF NOT EXISTS prep.locations (
           location_id SERIAL PRIMARY KEY,
@@ -65,6 +65,12 @@ BEGIN
           state VARCHAR(100),
           latitude NUMERIC(9,6) NOT NULL,
           longitude NUMERIC(9,6) NOT NULL,
+          address_tsv TSVECTOR GENERATED ALWAYS AS (
+            to_tsvector(
+              ''english''::regconfig,
+              COALESCE(address, '''') || '' '' || COALESCE(city, '''') || '' '' || COALESCE(state, '''')
+            )
+          ) STORED,
           created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT now(),
           updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT now(),
           "BOM_SiteID" INTEGER NOT NULL,
@@ -82,7 +88,7 @@ BEGIN
         )
       ';
 
-      -- Create simplified prep.daily_seasonal_indices table
+      -- prep.daily_seasonal_indices table
       EXECUTE '
         CREATE TABLE IF NOT EXISTS prep.daily_seasonal_indices (
           id SERIAL PRIMARY KEY,
@@ -121,10 +127,43 @@ BEGIN
         )
       ';
 
-      -- Minimal safe indexes
+      -- Indexes for prep.locations
+      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_address_tsv ON prep.locations USING gin (address_tsv)';
+      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_locations_active_status ON prep.locations (status) WHERE status = ''active''';
+      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_locations_geom ON prep.locations USING gist (geom)';
+      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_locations_geom_gist ON prep.locations USING gist (geom)';
+      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_locations_id ON prep.locations (location_id)';
       EXECUTE 'CREATE INDEX IF NOT EXISTS idx_locations_status ON prep.locations (status)';
+      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_locations_wmo ON prep.locations (wmo)';
+
+      -- Indexes for prep.daily_seasonal_indices
+      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_daily_seasonal_composite_lookup ON prep.daily_seasonal_indices (
+        location_id, month_of_year, day_of_month, modified_seasonal_index,
+        modified_rainfall_trigger, optimal_hour_trigger, high_risk_flag,
+        temporal_context_flag, version
+      )';
+
       EXECUTE 'CREATE INDEX IF NOT EXISTS idx_daily_seasonal_indices_location_id ON prep.daily_seasonal_indices (location_id)';
-      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_daily_seasonal_indices_location_month_day ON prep.daily_seasonal_indices (location_id, month_of_year, day_of_month)';
+
+      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_daily_seasonal_indices_location_month_day ON prep.daily_seasonal_indices (
+        location_id, month_of_year, day_of_month
+      ) INCLUDE (
+        modified_seasonal_index, modified_rainfall_trigger, optimal_hour_trigger,
+        high_risk_flag, temporal_context_flag
+      )';
+
+      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_daily_seasonal_indices_lookup ON prep.daily_seasonal_indices (
+        location_id, month_of_year, day_of_month
+      ) WHERE modified_seasonal_index IS NOT NULL';
+
+      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_daily_seasonal_indices_moderate_risk ON prep.daily_seasonal_indices (
+        location_id, moderate_risk_flag
+      ) WHERE moderate_risk_flag = true';
+
+      EXECUTE 'CREATE INDEX IF NOT EXISTS idx_daily_seasonal_indices_month_day ON prep.daily_seasonal_indices (
+        month_of_year, day_of_month
+      )';
+
     END IF;
 
   ELSE
